@@ -7,63 +7,74 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/justnoise/maelstrom/messages"
 )
 
-type HandlerFunc func(*messages.Request) error
+type HandlerFunc func(messages.Request) error
 
 type Set map[interface{}]struct{}
 
 type Node struct {
 	sync.Mutex
-	logMutex  sync.Mutex
-	ID        string
-	NodeIDs   []string
-	NextMsgID int
-	neighbors []string
-	Handlers  map[string]HandlerFunc
-	messages  Set
+	stderrMutex      sync.Mutex
+	stdoutMutex      sync.Mutex
+	ID               string
+	NodeIDs          []string
+	NextMsgID        int
+	neighbors        []string
+	Handlers         map[string]HandlerFunc
+	messages         Set
+	inFlightMessages map[int]struct{}
 }
 
 func New() *Node {
 	n := &Node{
-		NextMsgID: 0,
-		Handlers:  make(map[string]HandlerFunc),
-		messages:  make(Set),
+		NextMsgID:        0,
+		Handlers:         make(map[string]HandlerFunc),
+		messages:         make(Set),
+		inFlightMessages: make(map[int]struct{}),
 	}
 	n.Handlers["init"] = n.HandleInit
 	n.Handlers["topology"] = n.HandleTopology
 	n.Handlers["read"] = n.HandleRead
 	n.Handlers["broadcast"] = n.HandleBroadcast
+	n.Handlers["broadcast_ok"] = n.HandleBroadcastOK
 	return n
 }
 
-func (n *Node) HandleInit(req *messages.Request) error {
+func (n *Node) HandleInit(req messages.Request) error {
+	n.Lock()
 	n.ID = req.Body.NodeID
 	n.NodeIDs = req.Body.NodeIDs
-	n.Reply(req, &messages.ReplyBase{
+	n.Unlock()
+	n.Reply(&req, &messages.ReplyBase{
 		Type: "init_ok",
 	})
 	n.Log(fmt.Sprintf("Node %s initialized", n.ID))
 	return nil
 }
 
-func (n *Node) HandleTopology(req *messages.Request) error {
+func (n *Node) HandleTopology(req messages.Request) error {
+	n.Lock()
 	n.neighbors = req.Body.Topology[n.ID]
+	n.Unlock()
 	n.Log(fmt.Sprintf("My neighbors are %s", n.neighbors))
-	n.Reply(req, &messages.ReplyBase{
+	n.Reply(&req, &messages.ReplyBase{
 		Type: "topology_ok",
 	})
 	return nil
 }
 
-func (n *Node) HandleRead(req *messages.Request) error {
+func (n *Node) HandleRead(req messages.Request) error {
+	n.Lock()
 	msgs := make([]interface{}, len(n.messages))
 	for msg := range n.messages {
 		msgs = append(msgs, msg)
 	}
-	n.Reply(req, &messages.ReplyMessages{
+	n.Unlock()
+	n.Reply(&req, &messages.ReplyMessages{
 		ReplyBase: messages.ReplyBase{
 			Type: "read_ok",
 		},
@@ -72,35 +83,73 @@ func (n *Node) HandleRead(req *messages.Request) error {
 	return nil
 }
 
-func (n *Node) HandleBroadcast(req *messages.Request) error {
-	if req.Body.Message == nil {
-		fmt.Fprintln(os.Stderr, "No message in broadcast request")
+func (n *Node) HandleBroadcastOK(req messages.Request) error {
+	n.Lock()
+	if _, ok := n.inFlightMessages[req.Body.InReplyTo]; !ok {
+		n.Log(fmt.Sprintf("Received broadcast_ok for unknown message %d", req.Body.InReplyTo))
+	} else {
+		delete(n.inFlightMessages, req.Body.InReplyTo)
 	}
-	if _, ok := n.messages[req.Body.Message]; !ok {
+	n.Unlock()
+	return nil
+}
+
+func (n *Node) HandleBroadcast(req messages.Request) error {
+	if req.Body.Message == nil {
+		n.Log("No message in broadcast request")
+		return nil
+	}
+	n.Reply(&req, &messages.ReplyBase{
+		Type: "broadcast_ok",
+	})
+	// If we haven't already seen this message, broadcast it to our neighbors
+	n.Lock()
+	_, alreadySeenMessage := n.messages[req.Body.Message]
+	if !alreadySeenMessage {
 		n.messages[req.Body.Message] = struct{}{}
+	}
+	n.Unlock()
+	if !alreadySeenMessage {
 		for _, neighbor := range n.neighbors {
-			n.Send(&messages.Request{
-				Src:  n.ID,
-				Dest: neighbor,
-				Body: messages.RequestBody{
-					Type:    "broadcast",
-					Message: req.Body.Message,
-				},
+			if neighbor == req.Src {
+				continue
+			}
+			go n.RPCWithRetry(neighbor, messages.RequestBody{
+				Type:    "broadcast",
+				Message: req.Body.Message,
 			})
 		}
-	}
-	if req.Body.MsgID != 0 {
-		n.Reply(req, &messages.ReplyBase{
-			Type: "broadcast_ok",
-		})
 	}
 	return nil
 }
 
+func (n *Node) RPCWithRetry(dest string, body messages.RequestBody) {
+	n.Lock()
+	n.NextMsgID++
+	msgID := n.NextMsgID
+	n.inFlightMessages[msgID] = struct{}{}
+	n.Unlock()
+	body.SetMsgID(msgID)
+	// todo: while we don't have a reply, try to send the message
+	messageUnacked := true
+	for messageUnacked {
+		n.Log(fmt.Sprintf("There are %d unacked messages", len(n.inFlightMessages)))
+		n.Send(&messages.Request{
+			Src:  n.ID,
+			Dest: dest,
+			Body: body,
+		})
+		time.Sleep(1 * time.Second)
+		n.Lock()
+		_, messageUnacked = n.inFlightMessages[msgID]
+		n.Unlock()
+	}
+}
+
 func (n *Node) Log(msg string) {
-	n.logMutex.Lock()
-	defer n.logMutex.Unlock()
+	n.stderrMutex.Lock()
 	fmt.Fprintln(os.Stderr, msg)
+	defer n.stderrMutex.Unlock()
 }
 
 func (n *Node) Reply(req *messages.Request, body messages.ReplyBodyable) {
@@ -113,42 +162,54 @@ func (n *Node) Reply(req *messages.Request, body messages.ReplyBodyable) {
 }
 
 func (n *Node) Send(msg interface{}) {
-	// n.NextMsgID++
-	// body.SetMsgID(n.NextMsgID)
 	replyJSON, err := json.Marshal(msg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	n.Log(fmt.Sprintf("Sending %s", replyJSON))
-	fmt.Println(string(replyJSON))
+	n.putMsgOnWire(string(replyJSON))
 }
 
-func (n *Node) ParseMsg(line string) *messages.Request {
-	req := &messages.Request{}
-	err := json.Unmarshal([]byte(line), req)
+func (n *Node) putMsgOnWire(msg string) {
+	n.stdoutMutex.Lock()
+	fmt.Println(msg)
+	n.stdoutMutex.Unlock()
+}
+
+func (n *Node) ParseMsg(line string) messages.Request {
+	req := messages.Request{}
+	err := json.Unmarshal([]byte(line), &req)
 	if err != nil {
+		n.Log(fmt.Sprintf("Error parsing message: %s into %+v", line, req))
 		log.Fatal(err)
 	}
 	return req
 }
 
 func (n *Node) Run() {
+	reader := bufio.NewReader(os.Stdin)
 	for {
-		reader := bufio.NewReader(os.Stdin)
 		msgJSON, err := reader.ReadString('\n')
-		n.Log(fmt.Sprintf("Received %s", msgJSON))
-		msg := n.ParseMsg(msgJSON)
-
-		handler, ok := n.Handlers[msg.Body.Type]
-		if !ok {
-			n.Log(fmt.Sprintf("No handler for %s", msg.Body.Type))
+		if err != nil {
+			n.Log(fmt.Sprintf("Error reading from stdin: %s", err))
 			os.Exit(1)
 		}
-		n.Lock()
-		err = handler(msg)
-		n.Unlock()
-		if err != nil {
-			n.Log(fmt.Sprintf("Error handling %+v: %s", msg, err))
+		n.Log(fmt.Sprintf("Received %s", msgJSON))
+		if len(msgJSON) <= 1 {
+			n.Log(fmt.Sprintf("Empty message received"))
+			continue
 		}
+		req := n.ParseMsg(msgJSON)
+		handler, ok := n.Handlers[req.Body.Type]
+		if !ok {
+			n.Log(fmt.Sprintf("No handler for %s", req.Body.Type))
+			os.Exit(1)
+		}
+		go func() {
+			err = handler(req)
+			if err != nil {
+				n.Log(fmt.Sprintf("Error handling %+v: %s", req, err))
+			}
+		}()
 	}
 }
