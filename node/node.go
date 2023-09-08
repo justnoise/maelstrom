@@ -130,7 +130,6 @@ func (n *Node) RPCWithRetry(dest string, body messages.RequestBody) {
 	n.inFlightMessages[msgID] = struct{}{}
 	n.Unlock()
 	body.MsgID = msgID
-	// todo: while we don't have a reply, try to send the message
 	messageUnacked := true
 	for messageUnacked {
 		n.Log(fmt.Sprintf("There are %d unacked messages", len(n.inFlightMessages)))
