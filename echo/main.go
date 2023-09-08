@@ -23,17 +23,19 @@ func (s *Server) reply(request messages.Request) {
 	}
 	switch request.Body.Type {
 	case "init":
-		reply.Body = messages.ReplyBody{
+		reply.Body = &messages.ReplyBodyBase{
 			Type:      request.Body.Type + "_ok",
 			MsgID:     s.nextMsgID,
 			InReplyTo: request.Body.MsgID,
 		}
 	case "echo":
-		reply.Body = messages.ReplyBody{
-			Type:      request.Body.Type + "_ok",
-			Echo:      request.Body.Echo,
-			MsgID:     s.nextMsgID,
-			InReplyTo: request.Body.MsgID,
+		reply.Body = &messages.ReplyBodyEcho{
+			ReplyBodyBase: messages.ReplyBodyBase{
+				Type:      request.Body.Type + "_ok",
+				MsgID:     s.nextMsgID,
+				InReplyTo: request.Body.MsgID,
+			},
+			Echo: request.Body.Echo,
 		}
 	}
 	replyJSON, err := json.Marshal(reply)

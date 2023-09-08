@@ -49,7 +49,7 @@ func (n *Node) HandleInit(req messages.Request) error {
 	n.ID = req.Body.NodeID
 	n.NodeIDs = req.Body.NodeIDs
 	n.Unlock()
-	n.Reply(&req, &messages.ReplyBase{
+	n.Reply(&req, &messages.ReplyBodyBase{
 		Type: "init_ok",
 	})
 	n.Log(fmt.Sprintf("Node %s initialized", n.ID))
@@ -61,7 +61,7 @@ func (n *Node) HandleTopology(req messages.Request) error {
 	n.neighbors = req.Body.Topology[n.ID]
 	n.Unlock()
 	n.Log(fmt.Sprintf("My neighbors are %s", n.neighbors))
-	n.Reply(&req, &messages.ReplyBase{
+	n.Reply(&req, &messages.ReplyBodyBase{
 		Type: "topology_ok",
 	})
 	return nil
@@ -74,8 +74,8 @@ func (n *Node) HandleRead(req messages.Request) error {
 		msgs = append(msgs, msg)
 	}
 	n.Unlock()
-	n.Reply(&req, &messages.ReplyMessages{
-		ReplyBase: messages.ReplyBase{
+	n.Reply(&req, &messages.ReplyBodyMessages{
+		ReplyBodyBase: messages.ReplyBodyBase{
 			Type: "read_ok",
 		},
 		Messages: msgs,
@@ -99,7 +99,7 @@ func (n *Node) HandleBroadcast(req messages.Request) error {
 		n.Log("No message in broadcast request")
 		return nil
 	}
-	n.Reply(&req, &messages.ReplyBase{
+	n.Reply(&req, &messages.ReplyBodyBase{
 		Type: "broadcast_ok",
 	})
 	// If we haven't already seen this message, broadcast it to our neighbors
@@ -129,7 +129,7 @@ func (n *Node) RPCWithRetry(dest string, body messages.RequestBody) {
 	msgID := n.NextMsgID
 	n.inFlightMessages[msgID] = struct{}{}
 	n.Unlock()
-	body.SetMsgID(msgID)
+	body.MsgID = msgID
 	// todo: while we don't have a reply, try to send the message
 	messageUnacked := true
 	for messageUnacked {
