@@ -18,6 +18,9 @@ type RequestBody struct {
 	Echo      string              `json:"echo,omitempty"`
 	Topology  map[string][]string `json:"topology,omitempty"`
 	Message   interface{}         `json:"message,omitempty"`
+	Element   interface{}         `json:"element,omitempty"`
+	Value     interface{}         `json:"value,omitempty"`
+	Delta     interface{}         `json:"delta,omitempty"`
 }
 
 type ReplyBodyable interface {
@@ -53,4 +56,9 @@ type ReplyBodyEcho struct {
 type ReplyBodyMessages struct {
 	ReplyBodyBase
 	Messages []interface{} `json:"messages"`
+}
+
+type ReplyBodyValue struct {
+	ReplyBodyBase
+	Value interface{} `json:"value"`
 }

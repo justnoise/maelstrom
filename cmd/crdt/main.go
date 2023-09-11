@@ -1,7 +1,7 @@
 package main
 
 import (
-	node "github.com/justnoise/maelstrom/broadcast_node"
+	node "github.com/justnoise/maelstrom/crdt_node"
 )
 
 type Server struct {
